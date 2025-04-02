@@ -168,314 +168,512 @@ class ImageProcessorThread(QThread):
         self.api_key = api_key
         self.project_id = project_id
         self.should_stop = False
+        self.predictor = None
     
     def stop(self):
         self.should_stop = True
     
     def run(self):
-        from datetime import datetime
-        import re
-        import cv2
-        import numpy as np
-        import csv
-        from skimage.measure import regionprops
-        
+        """Método principal que ejecuta el procesamiento de imágenes."""
         try:
-            # Create main folder with timestamp
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            main_folder = os.path.join(self.image_folder, f"processed_images_{timestamp}")
+            # Configurar directorios y archivos
+            timestamp = self.setup_directories()
             
-            # Create directory structure
-            os.makedirs(main_folder, exist_ok=True)
-            overlay_folder = os.path.join(main_folder, "overlayed_images")
-            masks_folder = os.path.join(main_folder, "masks")
-            masks_calc_folder = os.path.join(main_folder, "masks_calculations")
+            # Inicializar archivos CSV
+            detailed_csv_path, summary_csv_path = self.setup_csv_files(timestamp)
             
-            os.makedirs(overlay_folder, exist_ok=True)
-            os.makedirs(masks_folder, exist_ok=True)
-            os.makedirs(masks_calc_folder, exist_ok=True)
-            
-            # Create CSV files
-            detailed_csv_path = os.path.join(main_folder, "detailed_results.csv")
-            summary_csv_path = os.path.join(main_folder, "summary_results.csv")
-            
-            # Initialize CSV files
-            with open(detailed_csv_path, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(['Imagen', 'Número de objeto', 'Diámetro máximo de Feret (um)', 'Circularidad'])
-            
-            with open(summary_csv_path, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(['Imagen', 'Número de objetos', 'Promedio diámetro de Feret (um)', 'Promedio circularidad'])
-            
-            # Process images
-            images = [f for f in os.listdir(self.image_folder) if f.lower().endswith((".png", ".jpg", ".jpeg", ".tiff", ".tif"))]
-            total_images = len(images)
-            
-            try:
-                predictor = Predictor(endpoint_id=self.project_id, api_key=self.api_key)
-            except ConnectionError as e:
-                self.error_occurred.emit("Error de conexión con LandingAI. Comprueba tu conexión a internet y que la API Key sea correcta.")
-                return
-            except Exception as e:
-                self.error_occurred.emit(f"Error al inicializar el predictor: {str(e)}")
+            # Inicializar predictor
+            if not self.initialize_predictor():
                 return
             
+            # Obtener la lista de imágenes
+            images = self.get_image_files()
+            
+            # Procesar cada imagen
             for i, filename in enumerate(images, start=1):
                 if self.should_stop:
                     break
-                    
-                try:
-                    image_path = os.path.join(self.image_folder, filename)
-                    
-                    # Get microns per pixel
-                    micrometers_per_pixel = 1.0  # Default value
-                    try:
-                        if filename.lower().endswith(('.tiff', '.tif')):
-                            with tifffile.TiffFile(image_path) as tif:
-                                if 'ImageDescription' in tif.pages[0].tags:
-                                    desc = tif.pages[0].tags['ImageDescription'].value
-                                    # Look for MicronsPerPixel in JSON within XML comments
-                                    if "MicronsPerPixel" in desc:
-                                        match = re.search(r'"MicronsPerPixel":\s*([\d.]+)', desc)
-                                        if match:
-                                            micrometers_per_pixel = float(match.group(1))
-                    except Exception as e:
-                        print(f"Error getting microns per pixel: {e}")
-                    
-                    # Load and process image
-                    img = Image.open(image_path).convert("RGB")
-                    predictions = predictor.predict(img)
-                    
-                    # Save overlayed image
-                    overlayed_img = overlay_predictions(predictions, img)
-                    overlay_save_path = os.path.join(overlay_folder, filename)
-                    overlayed_img.save(overlay_save_path)
-                    
-                    # Create basic mask
-                    black_img = Image.new("L", img.size, 0)
-                    labels = [pred.label_name for pred in predictions]
-                    mask_alpha = {"mask_alpha": 1.0}
-                    color_map = {label: "white" for label in labels}
-                    options = {**color_map, **mask_alpha}
-                    mask_img = overlay_colored_masks(predictions, black_img, options)
-                    
-                    # Save basic mask
-                    base_name = os.path.splitext(filename)[0]
-                    original_extension = os.path.splitext(filename)[1]
-                    mask_save_path = os.path.join(masks_folder, f"{base_name}-mask{original_extension}")
-                    mask_img.save(mask_save_path)
-                    
-                    # Process mask
-                    mask_np = np.array(mask_img.convert("L"))
-                    _, binary_mask = cv2.threshold(mask_np, 127, 255, cv2.THRESH_BINARY)
-                    
-                    # Get connected components
-                    num_labels, labels = cv2.connectedComponents(binary_mask)
-                    
-                    # Create border mask
-                    height, width = binary_mask.shape
-                    border_mask = np.zeros((height, width), dtype=bool)
-                    border_mask[0, :] = True
-                    border_mask[height-1, :] = True
-                    border_mask[:, 0] = True
-                    border_mask[:, width-1] = True
-                    
-                    # Remove border objects
-                    border_labels = set()
-                    for label in range(1, num_labels):
-                        if np.any(border_mask[labels == label]):
-                            border_labels.add(label)
-                    
-                    # Create clean mask
-                    clean_mask = np.zeros_like(binary_mask)
-                    for label in range(1, num_labels):
-                        if label not in border_labels:
-                            clean_mask[labels == label] = 255
-                    
-                    # Apply watershed
-                    if np.any(clean_mask):
-                        dist_transform = cv2.distanceTransform(clean_mask, cv2.DIST_L2, 5)
-                        cv2.normalize(dist_transform, dist_transform, 0, 1.0, cv2.NORM_MINMAX)
-                        
-                        threshold_value = 0.5 * dist_transform.max()
-                        if threshold_value == 0:
-                            threshold_value = 0.1
-                        
-                        _, sure_fg = cv2.threshold(dist_transform, threshold_value, 255, 0)
-                        sure_fg = sure_fg.astype(np.uint8)
-                        
-                        sure_bg = cv2.dilate(clean_mask, None, iterations=2)
-                        unknown = cv2.subtract(sure_bg, sure_fg)
-                        
-                        ret, markers = cv2.connectedComponents(sure_fg)
-                        markers = markers + 1
-                        markers[unknown == 255] = 0
-                        
-                        watershed_input = cv2.cvtColor(clean_mask, cv2.COLOR_GRAY2BGR)
-                        markers = cv2.watershed(watershed_input, markers)
-                        
-                        watershed_mask = np.zeros_like(clean_mask)
-                        watershed_mask[markers > 1] = 255
-                    else:
-                        watershed_mask = clean_mask
-                    
-                    # Get final labels
-                    final_num_labels, final_labels = cv2.connectedComponents(watershed_mask)
-                    
-                    # Measure objects
-                    feret_diameters = []
-                    circularity_values = []
-                    object_data = []
-                    
-                    valid_object_count = 0
-                    
-                    for label_idx in range(1, final_num_labels):
-                        # Get object mask
-                        object_mask = (final_labels == label_idx).astype(np.uint8)
-                        
-                        # Skip small objects
-                        if np.sum(object_mask) < 30:
-                            continue
-                        
-                        valid_object_count += 1
-                        
-                        # Get properties
-                        props = regionprops(object_mask)
-                        if not props:
-                            continue
-                            
-                        props = props[0]
-                        
-                        # Calculate Feret diameter
-                        feret_diameter_px = props.feret_diameter_max
-                        feret_diameter_um = feret_diameter_px * micrometers_per_pixel
-                        feret_diameters.append(feret_diameter_um)
-                        
-                        # Get contour
-                        contours, _ = cv2.findContours(object_mask * 255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                        if not contours:
-                            continue
-                            
-                        contour = max(contours, key=cv2.contourArea)
-                        area = cv2.contourArea(contour)
-                        perimeter = cv2.arcLength(contour, True)
-                        
-                        # Find max inscribed circle
-                        dist_transform = cv2.distanceTransform(object_mask, cv2.DIST_L2, 5)
-                        _, max_val, _, max_loc = cv2.minMaxLoc(dist_transform)
-                        
-                        # Calculate circularity
-                        if perimeter > 0:
-                            circularity = 4 * np.pi * (area / (perimeter * perimeter))
-                            circularity_values.append(circularity)
-                            
-                            # Store object data
-                            object_data.append({
-                                'contour': contour,
-                                'feret_diameter': feret_diameter_um,
-                                'circularity': circularity,
-                                'max_circle_center': max_loc,
-                                'max_circle_radius': max_val,
-                                'object_number': valid_object_count
-                            })
-                            
-                            # Write to detailed CSV
-                            with open(detailed_csv_path, 'a', newline='') as f:
-                                writer = csv.writer(f)
-                                writer.writerow([
-                                    filename,
-                                    valid_object_count,
-                                    f"{feret_diameter_um:.2f}",
-                                    f"{circularity:.4f}"
-                                ])
-                    
-                    # Calculate averages
-                    avg_feret = np.mean(feret_diameters) if feret_diameters else 0
-                    avg_circularity = np.mean(circularity_values) if circularity_values else 0
-                    
-                    # Write to summary CSV
-                    with open(summary_csv_path, 'a', newline='') as f:
-                        writer = csv.writer(f)
-                        writer.writerow([
-                            filename,
-                            valid_object_count,
-                            f"{avg_feret:.2f}",
-                            f"{avg_circularity:.4f}"
-                        ])
-                    
-                    # Create calculation mask
-                    calc_mask = np.zeros((height, width, 3), dtype=np.uint8)
-                    
-                    # Draw objects
-                    for obj_data in object_data:
-                        contour = obj_data['contour']
-                        feret_diam = obj_data['feret_diameter']
-                        circularity = obj_data['circularity']
-                        circle_center = obj_data['max_circle_center']
-                        circle_radius = obj_data['max_circle_radius']
-                        object_number = obj_data['object_number']
-                        
-                        # Draw object
-                        cv2.drawContours(calc_mask, [contour], -1, (255, 255, 255), -1)
-                        cv2.drawContours(calc_mask, [contour], -1, (0, 255, 0), 2)
-                        
-                        # Get centroid
-                        M = cv2.moments(contour)
-                        if M["m00"] != 0:
-                            cX = int(M["m10"] / M["m00"])
-                            cY = int(M["m01"] / M["m00"])
-                        else:
-                            cX, cY = circle_center
-                        
-                        # Draw Feret line using min area rect
-                        rect = cv2.minAreaRect(contour)
-                        box = cv2.boxPoints(rect)
-                        box = np.int0(box)
-                        width_rect = max(rect[1][0], rect[1][1])
-                        
-                        # Find maximum distance points
-                        max_dist = 0
-                        max_pts = None
-                        for ii in range(4):
-                            for jj in range(ii+1, 4):
-                                dist = np.sqrt((box[ii][0] - box[jj][0])**2 + (box[ii][1] - box[jj][1])**2)
-                                if dist > max_dist:
-                                    max_dist = dist
-                                    max_pts = (box[ii], box[jj])
-                        
-                        if max_pts:
-                            cv2.line(calc_mask, tuple(max_pts[0]), tuple(max_pts[1]), (0, 0, 255), 2)
-                        
-                        # Draw max inscribed circle
-                        cv2.circle(calc_mask, circle_center, int(circle_radius), (255, 0, 0), 2)
-                        
-                        # Add text
-                        font = cv2.FONT_HERSHEY_SIMPLEX
-                        text_x = int(cX + width_rect/2)  # Position text to the right
-                        cv2.putText(calc_mask, f"#{object_number}", (text_x, cY - 35), font, 0.7, (255, 255, 0), 2)
-                        cv2.putText(calc_mask, f"Feret: {feret_diam:.2f} um", (text_x, cY - 15), font, 0.6, (255, 255, 255), 2)
-                        cv2.putText(calc_mask, f"Circ: {circularity:.4f}", (text_x, cY + 15), font, 0.6, (255, 255, 255), 2)
-                    
-                    # Add scale info
-                    cv2.putText(calc_mask, f"Escala: {micrometers_per_pixel:.2f} um/px", (10, height - 20), font, 0.7, (255, 255, 255), 2)
-                    
-                    # Save calculation mask
-                    calc_mask_path = os.path.join(masks_calc_folder, f"{base_name}-calc{original_extension}")
-                    cv2.imwrite(calc_mask_path, calc_mask)
-                    
-                    # Update progress
-                    self.progress_updated.emit(i, overlay_save_path)
                 
+                try:
+                    self.process_single_image(filename, i, detailed_csv_path, summary_csv_path, timestamp)
                 except Exception as e:
                     self.error_occurred.emit(f"Error procesando imagen {filename}: {str(e)}")
                     continue
             
             self.processing_done.emit()
-        
+            
         except Exception as e:
             self.error_occurred.emit(f"Error general: {str(e)}")
+    
+    def setup_directories(self):
+        """Crea la estructura de directorios para los resultados."""
+        from datetime import datetime
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        main_folder = os.path.join(self.image_folder, f"processed_images_{timestamp}")
+        
+        # Crear estructura de directorios
+        os.makedirs(main_folder, exist_ok=True)
+        
+        # Crear subcarpetas
+        for subfolder in ["overlayed_images", "masks", "masks_calculations"]:
+            os.makedirs(os.path.join(main_folder, subfolder), exist_ok=True)
+        
+        return timestamp
+    
+    def setup_csv_files(self, timestamp):
+        """Inicializa los archivos CSV con sus encabezados."""
+        import csv
+        
+        main_folder = os.path.join(self.image_folder, f"processed_images_{timestamp}")
+        
+        # Paths de los archivos CSV
+        detailed_csv_path = os.path.join(main_folder, "detailed_results.csv")
+        summary_csv_path = os.path.join(main_folder, "summary_results.csv")
+        
+        # Inicializar CSV detallado
+        with open(detailed_csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Imagen', 'Número de objeto', 'Diámetro máximo de Feret (μm)', 'Circularidad'])
+        
+        # Inicializar CSV de resumen
+        with open(summary_csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Imagen', 'Número de objetos', 'Promedio diámetro de Feret (μm)', 'Promedio circularidad'])
+        
+        return detailed_csv_path, summary_csv_path
+    
+    def initialize_predictor(self):
+        """Inicializa el predictor de LandingAI."""
+        try:
+            from landingai.predict import Predictor
+            self.predictor = Predictor(endpoint_id=self.project_id, api_key=self.api_key)
+            return True
+        except ConnectionError as e:
+            self.error_occurred.emit("Error de conexión con LandingAI. Comprueba tu conexión a internet y que la API Key sea correcta.")
+            return False
+        except Exception as e:
+            self.error_occurred.emit(f"Error al inicializar el predictor: {str(e)}")
+            return False
+    
+    def get_image_files(self):
+        """Obtiene la lista de archivos de imagen en la carpeta."""
+        return [f for f in os.listdir(self.image_folder) 
+                if f.lower().endswith((".png", ".jpg", ".jpeg", ".tiff", ".tif"))]
+    
+    def process_single_image(self, filename, index, detailed_csv_path, summary_csv_path, timestamp):
+        """Procesa una imagen individual."""
+        import cv2
+        import numpy as np
+        from PIL import Image
+        from skimage.measure import regionprops
+        from landingai.visualize import overlay_predictions, overlay_colored_masks
+        
+        # Paths relevantes
+        image_path = os.path.join(self.image_folder, filename)
+        main_folder = os.path.join(self.image_folder, f"processed_images_{timestamp}")
+        base_name = os.path.splitext(filename)[0]
+        original_extension = os.path.splitext(filename)[1]
+        
+        # Obtener micrómetros por píxel
+        micrometers_per_pixel = self.extract_microns_per_pixel(image_path, filename)
+        
+        # Cargar y procesar imagen
+        img = Image.open(image_path).convert("RGB")
+        predictions = self.predictor.predict(img)
+        
+        # Guardar imagen con overlay
+        overlayed_img = overlay_predictions(predictions, img)
+        overlay_path = os.path.join(main_folder, "overlayed_images", filename)
+        overlayed_img.save(overlay_path)
+        
+        # Crear y guardar máscara básica
+        mask_img, mask_path = self.create_basic_mask(img, predictions, main_folder, base_name, original_extension)
+        
+        # Procesar máscara para análisis
+        clean_mask = self.process_mask(mask_img, main_folder, base_name, original_extension)
+        
+        # Analizar objetos en la máscara
+        object_data, feret_diameters, circularity_values = self.analyze_objects(
+            clean_mask, micrometers_per_pixel, detailed_csv_path, filename)
+        
+        # Escribir resumen en CSV
+        self.write_summary_csv(
+            summary_csv_path, filename, object_data, feret_diameters, circularity_values)
+        
+        # Crear visualización con datos
+        self.create_visualization(
+            clean_mask.shape, object_data, micrometers_per_pixel, 
+            main_folder, base_name, original_extension)
+        
+        # Actualizar progreso
+        self.progress_updated.emit(index, overlay_path)
+    
+    def extract_microns_per_pixel(self, image_path, filename):
+        """Extrae la información de micrómetros por píxel de los metadatos."""
+        import re
+        import tifffile
+        
+        # Valor predeterminado
+        micrometers_per_pixel = 1.0
+        
+        try:
+            if filename.lower().endswith(('.tiff', '.tif')):
+                with tifffile.TiffFile(image_path) as tif:
+                    if 'ImageDescription' in tif.pages[0].tags:
+                        desc = tif.pages[0].tags['ImageDescription'].value
+                        
+                        # Buscar MicronsPerPixel en JSON
+                        if "MicronsPerPixel" in desc:
+                            match = re.search(r'"MicronsPerPixel":\s*([\d.]+)', desc)
+                            if match:
+                                micrometers_per_pixel = float(match.group(1))
+                        
+                        # Buscar en el XML de OME
+                        elif "<OME" in desc and "PhysicalSizeX" in desc:
+                            match = re.search(r'PhysicalSizeX="([\d.]+)"', desc)
+                            if match:
+                                physical_size_x = float(match.group(1))
+                                size_match = re.search(r'SizeX="(\d+)"', desc)
+                                if size_match:
+                                    size_x = float(size_match.group(1))
+                                    micrometers_per_pixel = physical_size_x / size_x
+                    
+                    # Buscar en tags estándar
+                    if micrometers_per_pixel == 1.0 and 'XResolution' in tif.pages[0].tags:
+                        x_resolution = tif.pages[0].tags['XResolution'].value
+                        resolution_unit = tif.pages[0].tags.get('ResolutionUnit', None)
+                        
+                        if resolution_unit is not None:
+                            if resolution_unit.value == 2:  # Pulgadas
+                                micrometers_per_pixel = 25400.0 / float(x_resolution[0] / x_resolution[1])
+                            elif resolution_unit.value == 3:  # Centímetros
+                                micrometers_per_pixel = 10000.0 / float(x_resolution[0] / x_resolution[1])
+        except Exception as e:
+            print(f"Error obteniendo micrómetros por pixel: {e}")
+        
+        return micrometers_per_pixel
+    
+    def create_basic_mask(self, img, predictions, main_folder, base_name, original_extension):
+        """Crea la máscara básica a partir de las predicciones."""
+        from landingai.visualize import overlay_colored_masks
+        from PIL import Image
+        
+        # Crear máscara básica
+        black_img = Image.new("L", img.size, 0)
+        labels = [pred.label_name for pred in predictions]
+        mask_alpha = {"mask_alpha": 1.0}
+        color_map = {label: "white" for label in labels}
+        options = {**color_map, **mask_alpha}
+        mask_img = overlay_colored_masks(predictions, black_img, options)
+        
+        # Guardar máscara
+        mask_path = os.path.join(main_folder, "masks", f"{base_name}-mask{original_extension}")
+        mask_img.save(mask_path)
+        
+        return mask_img, mask_path
+    
+    def process_mask(self, mask_img, main_folder, base_name, original_extension):
+        """Procesa la máscara para separar objetos y eliminar objetos de borde."""
+        import cv2
+        import numpy as np
+        
+        # Convertir máscara a formato numpy
+        mask_np = np.array(mask_img.convert("L"))
+        _, binary_mask = cv2.threshold(mask_np, 127, 255, cv2.THRESH_BINARY)
+        
+        # Identificar objetos
+        num_labels, labels = cv2.connectedComponents(binary_mask)
+        
+        # Eliminar objetos que tocan el borde
+        height, width = binary_mask.shape
+        border_mask = np.zeros((height, width), dtype=bool)
+        border_mask[0, :] = True
+        border_mask[height-1, :] = True
+        border_mask[:, 0] = True
+        border_mask[:, width-1] = True
+        
+        # Identificar etiquetas que tocan el borde
+        border_labels = set()
+        for label in range(1, num_labels):
+            if np.any(border_mask[labels == label]):
+                border_labels.add(label)
+        
+        # Crear máscara limpia (sin objetos de borde)
+        clean_mask = np.zeros_like(binary_mask)
+        for label in range(1, num_labels):
+            if label not in border_labels:
+                clean_mask[labels == label] = 255
+        
+        return clean_mask
+    
+    def find_multiple_circles(self, mask):
+        """Encuentra múltiples círculos máximos dentro de una máscara de objeto."""
+        import cv2
+        import numpy as np
 
+        # Paraámetros configurables
+        local_max_threshold = 0.5 # El umbral para detectar máximos locales. X veces el valor máximo de la transformada de distancia.
+        max_allowed_superposition = 0.4 # La superposición máxima permitida está establecida en X veces la suma de los radios.
+
+        # Transformada de distancia
+        dist = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+        
+        # Normalizar para mejor visualización
+        if np.max(dist) > 0:
+            dist_normalized = cv2.normalize(dist, None, 0, 1.0, cv2.NORM_MINMAX)
+        else:
+            return []  # Máscara vacía
+        
+        # Encontrar máximos locales
+        kernel = np.ones((3, 3), np.uint8)
+        local_max = cv2.dilate(dist, kernel)
+        peaks = (dist == local_max) & (dist > local_max_threshold * np.max(dist))
+        
+        # Obtener coordenadas de máximos locales
+        coordinates = list(zip(*np.where(peaks)))
+        
+        # Ordenar por valor de distancia (descendente)
+        coordinates.sort(key=lambda p: dist[p[0], p[1]], reverse=True)
+        
+        # Almacenar círculos (center_y, center_x, radius)
+        circles = []
+        
+        # Empezar con el círculo más grande
+        if coordinates:
+            y, x = coordinates[0]
+            radius = dist[y, x]
+            circles.append((y, x, radius))
+            
+            # Procesar los máximos locales restantes
+            for y, x in coordinates[1:]:
+                radius = dist[y, x]
+                
+                # Comprobar solapamiento con círculos existentes
+                overlap_too_much = False
+                for cy, cx, cr in circles:
+                    # Calcular distancia euclidiana entre centros
+                    center_dist = np.sqrt((y - cy)**2 + (x - cx)**2)
+                    
+                    # Si los centros están más cerca del 30% de la suma de radios,
+                    # considerar que se solapan demasiado
+                    if center_dist < max_allowed_superposition * (radius + cr):
+                        overlap_too_much = True
+                        break
+                
+                # Añadir círculo si no se solapa demasiado
+                if not overlap_too_much and radius > 3:  # Radio mínimo para evitar ruido
+                    circles.append((y, x, radius))
+        
+        # Convertir a formato OpenCV (x, y, radius)
+        return [(x, y, r) for y, x, r in circles]
+    
+    def analyze_objects(self, watershed_mask, micrometers_per_pixel, detailed_csv_path, filename):
+        """Analiza los objetos en la máscara y calcula sus propiedades."""
+        import cv2
+        import numpy as np
+        import csv
+        from skimage.measure import regionprops
+        
+        # Obtener etiquetas finales
+        final_num_labels, final_labels = cv2.connectedComponents(watershed_mask)
+        
+        # Listas para almacenar mediciones
+        feret_diameters = []
+        circularity_values = []
+        object_data = []
+        
+        valid_object_count = 0
+        
+        # Procesar cada objeto
+        for label_idx in range(1, final_num_labels):
+            # Obtener máscara para este objeto
+            object_mask = (final_labels == label_idx).astype(np.uint8)
+            
+            # Excluir objetos muy pequeños
+            if np.sum(object_mask) < 30:
+                continue
+            
+            valid_object_count += 1
+            
+            # Obtener propiedades
+            props = regionprops(object_mask)
+            if not props:
+                continue
+                
+            props = props[0]
+            
+            # Calcular diámetro de Feret
+            feret_diameter_px = props.feret_diameter_max
+            feret_diameter_um = feret_diameter_px * micrometers_per_pixel
+            
+            # Intentar obtener los puntos exactos del diámetro de Feret
+            feret_points = None
+            if hasattr(props, 'feret_diameter_max_coordinates'):
+                feret_points = props.feret_diameter_max_coordinates
+                # Convertir coordenadas (row, col) a (x, y)
+                feret_points = [(int(p[1]), int(p[0])) for p in feret_points]
+            else:
+                # Cálculo manual si no está disponible
+                contours, _ = cv2.findContours(object_mask * 255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if contours:
+                    contour = max(contours, key=cv2.contourArea)
+                    contour_points = contour.reshape(-1, 2)
+                    
+                    # Optimización para contornos grandes
+                    if len(contour_points) > 100:
+                        step = max(1, len(contour_points) // 100)
+                        sparse_points = contour_points[::step]
+                    else:
+                        sparse_points = contour_points
+                    
+                    # Encontrar la distancia máxima
+                    max_dist = 0
+                    for i in range(len(sparse_points)):
+                        for j in range(i+1, len(sparse_points)):
+                            dist = np.sqrt(np.sum((sparse_points[i] - sparse_points[j])**2))
+                            if dist > max_dist:
+                                max_dist = dist
+                                feret_points = (
+                                    (int(sparse_points[i][0]), int(sparse_points[i][1])),
+                                    (int(sparse_points[j][0]), int(sparse_points[j][1]))
+                                )
+            
+            # Obtener contorno
+            contours, _ = cv2.findContours(object_mask * 255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not contours:
+                continue
+                
+            contour = max(contours, key=cv2.contourArea)
+            area = cv2.contourArea(contour)
+            perimeter = cv2.arcLength(contour, True)
+            
+            # Encontrar círculo máximo inscrito
+            dist_transform = cv2.distanceTransform(object_mask, cv2.DIST_L2, 5)
+            _, max_val, _, max_loc = cv2.minMaxLoc(dist_transform)
+            
+            # Calcular circularidad
+            if perimeter > 0:
+                circularity = 4 * np.pi * (area / (perimeter * perimeter))
+                circularity_values.append(circularity)
+                
+                # Encuentra múltiples círculos dentro del objeto
+                detected_circles = self.find_multiple_circles(object_mask)
+                
+                # Guardar datos del objeto
+                object_data.append({
+                    'contour': contour,
+                    'feret_diameter': feret_diameter_um,
+                    'feret_points': feret_points,
+                    'circularity': circularity,
+                    'max_circle_center': max_loc,
+                    'max_circle_radius': max_val,
+                    'object_number': valid_object_count,
+                    'detected_circles': detected_circles
+                })
+                
+                # Escribir en CSV detallado
+                with open(detailed_csv_path, 'a', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        filename,
+                        valid_object_count,
+                        f"{feret_diameter_um:.2f}",
+                        f"{circularity:.4f}"
+                    ])
+        
+        return object_data, feret_diameters, circularity_values
+    
+    def write_summary_csv(self, summary_csv_path, filename, object_data, feret_diameters, circularity_values):
+        """Escribe el resumen de mediciones en el archivo CSV."""
+        import csv
+        import numpy as np
+        
+        # Calcular promedios
+        avg_feret = np.mean(feret_diameters) if feret_diameters else 0
+        avg_circularity = np.mean(circularity_values) if circularity_values else 0
+        
+        # Escribir en CSV de resumen
+        with open(summary_csv_path, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                filename,
+                len(object_data),
+                f"{avg_feret:.2f}",
+                f"{avg_circularity:.4f}"
+            ])
+    
+    def create_visualization(self, shape, object_data, micrometers_per_pixel, main_folder, base_name, original_extension):
+        """Crea una visualización con anotaciones de los objetos."""
+        import cv2
+        import numpy as np
+        
+        height, width = shape
+        
+        # Crear máscara para visualización
+        calc_mask = np.zeros((height, width, 3), dtype=np.uint8)
+        
+        # Dibujar objetos
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        
+        for obj_data in object_data:
+            contour = obj_data['contour']
+            feret_diam = obj_data['feret_diameter']
+            feret_points = obj_data['feret_points']
+            circularity = obj_data['circularity']
+            circle_center = obj_data['max_circle_center']
+            circle_radius = obj_data['max_circle_radius']
+            object_number = obj_data['object_number']
+            detected_circles = obj_data.get('detected_circles', [])
+            
+            # Dibujar objeto
+            cv2.drawContours(calc_mask, [contour], -1, (255, 255, 255), -1)
+            cv2.drawContours(calc_mask, [contour], -1, (0, 255, 0), 2)
+            
+            # Calcular centroide
+            M = cv2.moments(contour)
+            if M["m00"] != 0:
+                cX = int(M["m10"] / M["m00"])
+                cY = int(M["m01"] / M["m00"])
+            else:
+                cX, cY = circle_center
+            
+            # Dibujar múltiples círculos en rosa
+            for circle_x, circle_y, radius in detected_circles:
+                cv2.circle(calc_mask, (circle_x, circle_y), int(radius), (180, 105, 255), 2)
+            
+            # Dibujar diámetro de Feret
+            if feret_points:
+                cv2.line(calc_mask, feret_points[0], feret_points[1], (0, 0, 255), 2)
+                # Añadir pequeños círculos en los extremos
+                cv2.circle(calc_mask, feret_points[0], 3, (0, 0, 255), -1)
+                cv2.circle(calc_mask, feret_points[1], 3, (0, 0, 255), -1)
+            
+            # Dibujar círculo máximo inscrito
+            cv2.circle(calc_mask, circle_center, int(circle_radius), (255, 0, 0), 2)
+            
+            # Calcular ancho para posicionar texto
+            rect = cv2.minAreaRect(contour)
+            width_rect = max(rect[1][0], rect[1][1])
+            
+            # Añadir textos
+            text_x = int(cX + width_rect/2)
+            cv2.putText(calc_mask, f"#{object_number}", (text_x, cY - 35), font, 0.7, (255, 255, 0), 2)
+            cv2.putText(calc_mask, f"Feret: {feret_diam:.2f} μm", (text_x, cY - 15), font, 0.6, (255, 255, 255), 2)
+            cv2.putText(calc_mask, f"Circ: {circularity:.4f}", (text_x, cY + 15), font, 0.6, (255, 255, 255), 2)
+            
+            # Añadir número de círculos detectados
+            if len(detected_circles) > 1:
+                cv2.putText(calc_mask, f"Círculos: {len(detected_circles)}", (text_x, cY + 45), 
+                          font, 0.6, (180, 105, 255), 2)
+        
+        # Añadir información de escala
+        cv2.putText(calc_mask, f"Escala: {micrometers_per_pixel:.2f} μm/px", (10, height - 20), 
+                   font, 0.7, (255, 255, 255), 2)
+        
+        # Guardar máscara con cálculos
+        calc_mask_path = os.path.join(main_folder, "masks_calculations", f"{base_name}-calc{original_extension}")
+        cv2.imwrite(calc_mask_path, calc_mask)
 
 class ImageProcessorApp(QWidget):
     def __init__(self):
