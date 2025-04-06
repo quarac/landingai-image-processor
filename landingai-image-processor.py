@@ -4,9 +4,9 @@ import torch
 import json
 import numpy as np
 from PIL import Image, ImageOps
-from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QPushButton, QLabel, QFileDialog, QListWidget, QListWidgetItem, QHBoxLayout, QLineEdit, QSplitter, QProgressBar, QSizePolicy, QTabWidget, QStyleFactory, QMessageBox)
+from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QPushButton, QLabel, QFileDialog, QListWidget, QListWidgetItem, QHBoxLayout, QLineEdit, QSplitter, QProgressBar, QSizePolicy, QTabWidget, QStyleFactory, QMessageBox, QDialog)
 from PyQt6.QtGui import QPixmap, QIcon, QDrag, QFontDatabase, QFont, QPalette, QColor, QKeySequence, QShortcut
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QMimeData
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QMimeData, QEventLoop
 from landingai.predict import Predictor
 from landingai.visualize import overlay_predictions, overlay_colored_masks
 from datetime import datetime
@@ -231,15 +231,17 @@ class ImageProcessorThread(QThread):
         detailed_csv_path = os.path.join(main_folder, "detailed_results.csv")
         summary_csv_path = os.path.join(main_folder, "summary_results.csv")
         
-        # Inicializar CSV detallado
+        # Inicializar CSV detallado - Añadir columna para diámetro del círculo máximo
         with open(detailed_csv_path, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['Imagen', 'Número de objeto', 'Diámetro máximo de Feret (μm)', 'Circularidad'])
+            writer.writerow(['Imagen', 'Número de objeto', 'Diámetro máximo de Feret (μm)', 
+                             'Diámetro del círculo máximo (μm)', 'Circularidad'])
         
-        # Inicializar CSV de resumen
+        # Inicializar CSV de resumen - Añadir columna para diámetro promedio del círculo máximo
         with open(summary_csv_path, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['Imagen', 'Número de objetos', 'Promedio diámetro de Feret (μm)', 'Promedio circularidad'])
+            writer.writerow(['Imagen', 'Número de objetos', 'Promedio diámetro de Feret (μm)', 
+                             'Promedio diámetro del círculo máximo (μm)', 'Promedio circularidad'])
         
         return detailed_csv_path, summary_csv_path
     
@@ -273,7 +275,6 @@ class ImageProcessorThread(QThread):
         image_path = os.path.join(self.image_folder, filename)
         main_folder = os.path.join(self.image_folder, f"processed_images_{timestamp}")
         base_name = os.path.splitext(filename)[0]
-        original_extension = os.path.splitext(filename)[1]
         
         # Obtener micrómetros por píxel
         micrometers_per_pixel = self.extract_microns_per_pixel(image_path, filename)
@@ -282,31 +283,35 @@ class ImageProcessorThread(QThread):
         img = Image.open(image_path).convert("RGB")
         predictions = self.predictor.predict(img)
         
-        # Guardar imagen con overlay
+        # Guardar imagen con overlay en formato JPG
         overlayed_img = overlay_predictions(predictions, img)
-        overlay_path = os.path.join(main_folder, "overlayed_images", filename)
-        overlayed_img.save(overlay_path)
+        # Cambiar extensión a .jpg
+        overlay_filename_jpg = f"{base_name}.jpg"
+        overlay_path = os.path.join(main_folder, "overlayed_images", overlay_filename_jpg)
+        # Guardar con formato JPEG
+        overlayed_img.save(overlay_path, format='JPEG', quality=90) # Calidad 90 (ajustable)
         
         # Crear y guardar máscara básica
-        mask_img, mask_path = self.create_basic_mask(img, predictions, main_folder, base_name, original_extension)
+        mask_img, mask_path = self.create_basic_mask(img, predictions, main_folder, base_name, ".jpg") # Pasar extensión .jpg
         
         # Procesar máscara para análisis
-        clean_mask = self.process_mask(mask_img, main_folder, base_name, original_extension)
+        clean_mask = self.process_mask(mask_img, main_folder, base_name, ".jpg") # Pasar extensión .jpg
         
         # Analizar objetos en la máscara
-        object_data, feret_diameters, circularity_values = self.analyze_objects(
+        object_data, feret_diameters, circle_diameters, circularity_values = self.analyze_objects(
             clean_mask, micrometers_per_pixel, detailed_csv_path, filename)
         
         # Escribir resumen en CSV
         self.write_summary_csv(
-            summary_csv_path, filename, object_data, feret_diameters, circularity_values)
+            summary_csv_path, filename, object_data, feret_diameters, circle_diameters, circularity_values)
         
         # Crear visualización con datos
         self.create_visualization(
             clean_mask.shape, object_data, micrometers_per_pixel, 
-            main_folder, base_name, original_extension)
+            main_folder, base_name, ".jpg") # Pasar extensión .jpg
         
-        # Actualizar progreso
+        # Actualizar progreso (usar ruta original o la nueva jpg para thumbnail?)
+        # Usemos la JPG para el progreso, ya que es la que se guarda
         self.progress_updated.emit(index, overlay_path)
     
     def extract_microns_per_pixel(self, image_path, filename):
@@ -354,23 +359,37 @@ class ImageProcessorThread(QThread):
         
         return micrometers_per_pixel
     
-    def create_basic_mask(self, img, predictions, main_folder, base_name, original_extension):
-        """Crea la máscara básica a partir de las predicciones."""
+    def create_basic_mask(self, img, predictions, main_folder, base_name, save_extension):
+        """Crea la máscara básica a partir de las predicciones y la guarda en JPG."""
         from landingai.visualize import overlay_colored_masks
         from PIL import Image
+
+        mask_filename_jpg = f"{base_name}-mask{save_extension}" # Usar extensión pasada
+        mask_path = os.path.join(main_folder, "masks", mask_filename_jpg)
         
         # Crear máscara básica
         black_img = Image.new("L", img.size, 0)
+
+        if len(predictions) == 0:
+            return black_img, mask_path
+        
+        # Crear el mapa de colores adecuado
         labels = [pred.label_name for pred in predictions]
         mask_alpha = {"mask_alpha": 1.0}
         color_map = {label: "white" for label in labels}
-        options = {**color_map, **mask_alpha}
+        options = {**color_map, **mask_alpha}  # Combinar color_map y mask_alpha
+        
         mask_img = overlay_colored_masks(predictions, black_img, options)
+
+        # Colorear máscara en blanco y negro
+        mask_img = mask_img.convert("L") # Convertir a escala de grises para JPG
+        # No convertir a modo "1", JPG no lo soporta bien. Se guarda como grayscale.
+        # mask_img = mask_img.point(lambda p: 255 if p > 0 else 0, "1") # ELIMINADO
+
+        # Guardar máscara en formato JPG
+        mask_img.save(mask_path, format='JPEG', quality=90) # Calidad 90 (ajustable)
         
-        # Guardar máscara
-        mask_path = os.path.join(main_folder, "masks", f"{base_name}-mask{original_extension}")
-        mask_img.save(mask_path)
-        
+        # Retornar la máscara PIL en formato 'L' para el procesamiento posterior
         return mask_img, mask_path
     
     def process_mask(self, mask_img, main_folder, base_name, original_extension):
@@ -378,9 +397,10 @@ class ImageProcessorThread(QThread):
         import cv2
         import numpy as np
         
-        # Convertir máscara a formato numpy
-        mask_np = np.array(mask_img.convert("L"))
-        _, binary_mask = cv2.threshold(mask_np, 127, 255, cv2.THRESH_BINARY)
+        # Convertir máscara PIL ('L') a formato numpy
+        mask_np = np.array(mask_img) # Ya está en 'L' (escala de grises)
+        # Aplicar umbral para asegurar que sea binaria internamente para el análisis
+        _, binary_mask = cv2.threshold(mask_np, 1, 255, cv2.THRESH_BINARY) # Umbral bajo porque viene de JPG
         
         # Identificar objetos
         num_labels, labels = cv2.connectedComponents(binary_mask)
@@ -480,6 +500,7 @@ class ImageProcessorThread(QThread):
         
         # Listas para almacenar mediciones
         feret_diameters = []
+        circle_diameters = []  # Nueva lista para diámetros de círculos máximos
         circularity_values = []
         object_data = []
         
@@ -506,6 +527,7 @@ class ImageProcessorThread(QThread):
             # Calcular diámetro de Feret
             feret_diameter_px = props.feret_diameter_max
             feret_diameter_um = feret_diameter_px * micrometers_per_pixel
+            feret_diameters.append(feret_diameter_um)
             
             # Intentar obtener los puntos exactos del diámetro de Feret
             feret_points = None
@@ -560,10 +582,15 @@ class ImageProcessorThread(QThread):
                 # Encuentra múltiples círculos dentro del objeto
                 detected_circles = self.find_multiple_circles(object_mask)
                 
+                # Calcular diámetro del círculo máximo en micrómetros
+                circle_diameter_um = max_val * 2 * micrometers_per_pixel
+                circle_diameters.append(circle_diameter_um)
+                
                 # Guardar datos del objeto
                 object_data.append({
                     'contour': contour,
                     'feret_diameter': feret_diameter_um,
+                    'circle_diameter': circle_diameter_um,
                     'feret_points': feret_points,
                     'circularity': circularity,
                     'max_circle_center': max_loc,
@@ -579,18 +606,20 @@ class ImageProcessorThread(QThread):
                         filename,
                         valid_object_count,
                         f"{feret_diameter_um:.2f}",
+                        f"{circle_diameter_um:.2f}",
                         f"{circularity:.4f}"
                     ])
         
-        return object_data, feret_diameters, circularity_values
+        return object_data, feret_diameters, circle_diameters, circularity_values
     
-    def write_summary_csv(self, summary_csv_path, filename, object_data, feret_diameters, circularity_values):
+    def write_summary_csv(self, summary_csv_path, filename, object_data, feret_diameters, circle_diameters, circularity_values):
         """Escribe el resumen de mediciones en el archivo CSV."""
         import csv
         import numpy as np
         
         # Calcular promedios
         avg_feret = np.mean(feret_diameters) if feret_diameters else 0
+        avg_circle = np.mean(circle_diameters) if circle_diameters else 0  # Promedio del diámetro del círculo
         avg_circularity = np.mean(circularity_values) if circularity_values else 0
         
         # Escribir en CSV de resumen
@@ -600,11 +629,12 @@ class ImageProcessorThread(QThread):
                 filename,
                 len(object_data),
                 f"{avg_feret:.2f}",
+                f"{avg_circle:.2f}",  # Añadir promedio del diámetro del círculo
                 f"{avg_circularity:.4f}"
             ])
     
-    def create_visualization(self, shape, object_data, micrometers_per_pixel, main_folder, base_name, original_extension):
-        """Crea una visualización con anotaciones de los objetos."""
+    def create_visualization(self, shape, object_data, micrometers_per_pixel, main_folder, base_name, save_extension):
+        """Crea una visualización con anotaciones de los objetos y la guarda en JPG."""
         import cv2
         import numpy as np
         
@@ -659,7 +689,7 @@ class ImageProcessorThread(QThread):
             # Añadir textos
             text_x = int(cX + width_rect/2)
             cv2.putText(calc_mask, f"#{object_number}", (text_x, cY - 35), font, 0.7, (255, 255, 0), 2)
-            cv2.putText(calc_mask, f"Feret: {feret_diam:.2f} μm", (text_x, cY - 15), font, 0.6, (255, 255, 255), 2)
+            cv2.putText(calc_mask, f"Feret: {feret_diam:.2f} um", (text_x, cY - 15), font, 0.6, (255, 255, 255), 2)
             cv2.putText(calc_mask, f"Circ: {circularity:.4f}", (text_x, cY + 15), font, 0.6, (255, 255, 255), 2)
             
             # Añadir número de círculos detectados
@@ -668,12 +698,14 @@ class ImageProcessorThread(QThread):
                           font, 0.6, (180, 105, 255), 2)
         
         # Añadir información de escala
-        cv2.putText(calc_mask, f"Escala: {micrometers_per_pixel:.2f} μm/px", (10, height - 20), 
+        cv2.putText(calc_mask, f"Escala: {micrometers_per_pixel:.2f} um/px", (10, height - 20), 
                    font, 0.7, (255, 255, 255), 2)
         
-        # Guardar máscara con cálculos
-        calc_mask_path = os.path.join(main_folder, "masks_calculations", f"{base_name}-calc{original_extension}")
-        cv2.imwrite(calc_mask_path, calc_mask)
+        # Guardar máscara con cálculos en formato JPG
+        calc_mask_filename_jpg = f"{base_name}-calc{save_extension}" # Usar extensión pasada
+        calc_mask_path = os.path.join(main_folder, "masks_calculations", calc_mask_filename_jpg)
+        # Especificar parámetros de calidad para JPG
+        cv2.imwrite(calc_mask_path, calc_mask, [cv2.IMWRITE_JPEG_QUALITY, 90]) # Calidad 90 (ajustable)
 
 class ImageProcessorApp(QWidget):
     def __init__(self):
@@ -762,15 +794,17 @@ class ImageProcessorApp(QWidget):
         config_title.setFont(font)
         left_layout.addWidget(config_title)
         
-        self.api_key_input = QLineEdit(self)
-        self.api_key_input.setPlaceholderText("Introduce API Key")
-        self.api_key_input.setText(self.api_key)
-        left_layout.addWidget(self.api_key_input)
+        # Botón de configuración
+        self.btn_config = QPushButton("Configurar API Key y Endpoint ID")
+        self.btn_config.setIcon(QIcon.fromTheme("configure"))
+        self.btn_config.clicked.connect(self.show_config_dialog)
+        left_layout.addWidget(self.btn_config)
         
-        self.project_id_input = QLineEdit(self)
-        self.project_id_input.setPlaceholderText("Introduce Project ID")
-        self.project_id_input.setText(self.project_id)
-        left_layout.addWidget(self.project_id_input)
+        # Añadir una etiqueta para mostrar estado de configuración (sin detalles de API key)
+        self.config_status_label = QLabel("Estado: No configurado")
+        self.config_status_label.setWordWrap(True)
+        left_layout.addWidget(self.config_status_label)
+        self.update_config_status()
         
         self.btn_select_folder = QPushButton("Seleccionar Carpeta de Imágenes")
         self.btn_select_folder.setIcon(QIcon.fromTheme("folder-open"))
@@ -982,13 +1016,10 @@ class ImageProcessorApp(QWidget):
         if not self.image_folder:
             return
         
-        self.api_key = self.api_key_input.text().strip()
-        self.project_id = self.project_id_input.text().strip()
-        self.save_settings()
-        
         if not self.api_key or not self.project_id:
-            self.processed_image_label.setText("Por favor, introduce API Key y Project ID")
-            self.original_image_label.setText("Por favor, introduce API Key y Project ID")
+            QMessageBox.warning(self, "Configuración incompleta", 
+                               "Por favor, configura la API Key y el Endpoint ID antes de procesar imágenes.")
+            self.show_config_dialog()
             return
         
         self.image_list.clear()
@@ -997,7 +1028,7 @@ class ImageProcessorApp(QWidget):
         self.thread = ImageProcessorThread(self.image_folder, self.api_key, self.project_id)
         self.thread.progress_updated.connect(self.update_progress)
         self.thread.processing_done.connect(self.processing_finished)
-        self.thread.error_occurred.connect(self.handle_processing_error)  # Nueva conexión para manejar errores
+        self.thread.error_occurred.connect(self.handle_processing_error)
         self.thread.start()
         
         self.btn_process.setText("Detener proceso")
@@ -1024,36 +1055,50 @@ class ImageProcessorApp(QWidget):
     
     def show_large_image(self, item):
         if item:
-            # Obtener la ruta de la imagen procesada
+            # Obtener la ruta de la imagen procesada (overlay) que ahora es JPG
             processed_path = item.data(Qt.ItemDataRole.UserRole)
             self.current_processed_path = processed_path
             
             # Deducir las rutas de las demás imágenes
-            filename = os.path.basename(processed_path)
-            base_name = os.path.splitext(filename)[0]
-            folder_path = os.path.dirname(processed_path)
-            parent_folder = os.path.dirname(folder_path)
+            overlay_filename = os.path.basename(processed_path) # e.g., imagen.jpg
+            base_name = os.path.splitext(overlay_filename)[0] # e.g., imagen
+            folder_path = os.path.dirname(processed_path) # .../processed_images_XXX/overlayed_images
+            parent_folder = os.path.dirname(folder_path) # .../processed_images_XXX
+            original_images_folder = os.path.dirname(parent_folder) # Carpeta original de imágenes
             
-            # Obtener la ruta de la imagen original
-            original_filename = filename
-            original_path = os.path.join(os.path.dirname(parent_folder), original_filename)
-            self.current_original_path = original_path
+            # Buscar la imagen original (probablemente TIFF)
+            # Necesitamos encontrar el archivo original que generó este JPG
+            original_tiff_path = os.path.join(original_images_folder, f"{base_name}.tiff")
+            original_tif_path = os.path.join(original_images_folder, f"{base_name}.tif")
+            if os.path.exists(original_tiff_path):
+                self.current_original_path = original_tiff_path
+            elif os.path.exists(original_tif_path):
+                 self.current_original_path = original_tif_path
+            else:
+                 # Si no se encuentra TIFF/TIF, buscar JPG/PNG original como respaldo
+                 original_jpg_path = os.path.join(original_images_folder, f"{base_name}.jpg")
+                 original_png_path = os.path.join(original_images_folder, f"{base_name}.png")
+                 if os.path.exists(original_jpg_path):
+                     self.current_original_path = original_jpg_path
+                 elif os.path.exists(original_png_path):
+                     self.current_original_path = original_png_path
+                 else:
+                     self.current_original_path = None # No se encontró original
             
-            # Obtener la ruta de la máscara
+            # Obtener la ruta de la máscara (ahora JPG)
             mask_folder = os.path.join(parent_folder, "masks")
-            extension = os.path.splitext(filename)[1]
-            mask_filename = f"{base_name}-mask{extension}"
+            mask_filename = f"{base_name}-mask.jpg" # Extensión .jpg
             mask_path = os.path.join(mask_folder, mask_filename)
             self.current_mask_path = mask_path if os.path.exists(mask_path) else None
             
-            # Obtener la ruta de la máscara con cálculos
+            # Obtener la ruta de la máscara con cálculos (ahora JPG)
             mask_calc_folder = os.path.join(parent_folder, "masks_calculations")
-            mask_calc_filename = f"{base_name}-calc{extension}"
+            mask_calc_filename = f"{base_name}-calc.jpg" # Extensión .jpg
             mask_calc_path = os.path.join(mask_calc_folder, mask_calc_filename)
             self.current_mask_calc_path = mask_calc_path if os.path.exists(mask_calc_path) else None
             
-            # Actualizar el nombre mostrado
-            self.image_name_label.setText(original_filename)
+            # Actualizar el nombre mostrado (usar el base_name)
+            self.image_name_label.setText(base_name) # Mostrar nombre base sin extensión
             
             # Actualizar la imagen según la pestaña actual
             self.on_tab_changed()
@@ -1103,7 +1148,8 @@ class ImageProcessorApp(QWidget):
         self.update_large_image()
     
     def save_settings(self):
-        settings = {"api_key": self.api_key, "project_id": self.project_id}
+        # Actualizar el nombre de la clave: "project_id" a "endpoint_id"
+        settings = {"api_key": self.api_key, "endpoint_id": self.project_id}
         with open(SETTINGS_FILE, "w") as f:
             json.dump(settings, f)
     
@@ -1112,7 +1158,8 @@ class ImageProcessorApp(QWidget):
             with open(SETTINGS_FILE, "r") as f:
                 settings = json.load(f)
                 self.api_key = settings.get("api_key", "")
-                self.project_id = settings.get("project_id", "")
+                # Manejar tanto el nuevo nombre (endpoint_id) como el antiguo (project_id)
+                self.project_id = settings.get("endpoint_id", settings.get("project_id", ""))
     
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.current_image_path:
@@ -1155,6 +1202,96 @@ class ImageProcessorApp(QWidget):
         if result == QMessageBox.StandardButton.Retry:
             # Reintentar procesamiento
             self.process_images()
+
+    def show_config_dialog(self):
+        """Muestra el diálogo de configuración como una ventana independiente"""
+        config_dialog = ConfigDialog(self, self.api_key, self.project_id)
+        
+        # Ejecutar el diálogo y capturar el resultado
+        if config_dialog.exec() == QDialog.DialogCode.Accepted:
+            self.api_key = config_dialog.api_key
+            self.project_id = config_dialog.endpoint_id
+            self.save_settings()
+            self.update_config_status()
+    
+    def update_config_status(self):
+        """Actualiza la etiqueta de estado de configuración sin mostrar datos sensibles"""
+        if self.api_key and self.project_id:
+            self.config_status_label.setText("Estado: Configurado ✓")
+            self.config_status_label.setStyleSheet("color: green;")
+        else:
+            self.config_status_label.setText("Estado: No configurado ✗")
+            self.config_status_label.setStyleSheet("color: red;")
+
+class ConfigDialog(QDialog):
+    def __init__(self, parent=None, api_key="", endpoint_id=""):
+        super().__init__(parent)
+        self.setWindowTitle("Configuración")
+        self.api_key = api_key
+        self.endpoint_id = endpoint_id
+        self.result = False
+        
+        # Configurar la ventana para que sea independiente y tenga controles de ventana
+        self.setWindowFlag(Qt.WindowType.Window)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
+        self.setWindowFlag(Qt.WindowType.WindowCloseButtonHint)
+        self.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint)
+        
+        self.initUI()
+    
+    def initUI(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(10)
+        
+        # Título
+        title = QLabel("Configuración de Landing AI")
+        title_font = title.font()
+        title_font.setPointSize(12)
+        title_font.setBold(True)
+        title.setFont(title_font)
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+        
+        # Campo de API Key
+        api_key_label = QLabel("API Key:")
+        self.api_key_input = QLineEdit(self.api_key)
+        self.api_key_input.setPlaceholderText("Introduce tu API Key de Landing AI")
+        layout.addWidget(api_key_label)
+        layout.addWidget(self.api_key_input)
+        
+        # Campo de Endpoint ID
+        endpoint_id_label = QLabel("Endpoint ID:")
+        self.endpoint_id_input = QLineEdit(self.endpoint_id)
+        self.endpoint_id_input.setPlaceholderText("Introduce el ID del endpoint")
+        layout.addWidget(endpoint_id_label)
+        layout.addWidget(self.endpoint_id_input)
+        
+        # Botones
+        button_layout = QHBoxLayout()
+        self.save_button = QPushButton("Guardar")
+        self.cancel_button = QPushButton("Cancelar")
+        
+        self.save_button.clicked.connect(self.accept)
+        self.cancel_button.clicked.connect(self.reject)
+        
+        button_layout.addWidget(self.cancel_button)
+        button_layout.addWidget(self.save_button)
+        
+        layout.addLayout(button_layout)
+        
+        self.setMinimumWidth(350)
+        self.setFixedHeight(layout.sizeHint().height())
+    
+    def accept(self):
+        self.api_key = self.api_key_input.text().strip()
+        self.endpoint_id = self.endpoint_id_input.text().strip()
+        self.result = True
+        super().accept()  # Usar el método estándar de QDialog
+    
+    def reject(self):
+        self.result = False
+        super().reject()  # Usar el método estándar de QDialog
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
