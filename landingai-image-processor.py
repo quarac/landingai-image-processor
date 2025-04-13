@@ -966,44 +966,80 @@ class ImageProcessorApp(QWidget):
         folder = QFileDialog.getExistingDirectory(self, "Seleccionar Carpeta")
         if folder:
             self.image_folder = folder
-            images = [f for f in os.listdir(folder) if f.lower().endswith((".tiff", ".tif"))]
-            total_images = len(images)
+            # Get original images (TIFF/TIF)
+            original_images = [f for f in os.listdir(folder) if f.lower().endswith((".tiff", ".tif"))]
+            total_original_images = len(original_images)
             
             folder_name = os.path.basename(folder)
-            self.folder_info_label.setText(f"Carpeta: {folder_name}\nTotal imágenes: {total_images}")
+            self.folder_info_label.setText(f"Carpeta: {folder_name}\nTotal imágenes originales: {total_original_images}")
             
-            self.progress_bar.setMaximum(total_images)
+            # Set progress bar maximum to the number of original images
+            self.progress_bar.setMaximum(total_original_images if total_original_images > 0 else 1) # Avoid max=0
             self.progress_bar.setValue(0)
+            self.image_list.clear() # Clear previous thumbnails
             
-            # Buscar carpetas overlayed_images existentes
-            overlayed_folders = [f for f in os.listdir(folder) if f.startswith("overlayed_images_")]
+            # Find existing processed folders
+            processed_folders = []
+            for item in os.listdir(folder):
+                item_path = os.path.join(folder, item)
+                if os.path.isdir(item_path) and item.startswith("processed_images_") and len(item.split('_')) == 3:
+                    try:
+                        # Extract timestamp for sorting
+                        timestamp_str = item.split('_', 2)[-1]
+                        # Attempt to parse the timestamp to ensure valid format
+                        datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S") 
+                        processed_folders.append((timestamp_str, item_path))
+                    except ValueError:
+                        # Ignore folders that don't match the expected timestamp format
+                        continue
             
-            if overlayed_folders:
-                # Ordenar por fecha (la más reciente primero)
-                overlayed_folders.sort(reverse=True)
-                latest_folder = os.path.join(folder, overlayed_folders[0])
+            if processed_folders:
+                # Sort by timestamp (most recent first)
+                processed_folders.sort(key=lambda x: x[0], reverse=True)
                 
-                # Cargar las imágenes existentes
-                self.image_list.clear()
-                overlayed_images = [f for f in os.listdir(latest_folder) if f.lower().endswith((".png", ".jpg", ".jpeg"))]
+                most_recent_folder_path = processed_folders[0][1]
+                most_recent_folder_name = os.path.basename(most_recent_folder_path)
+                overlay_images_path = os.path.join(most_recent_folder_path, "overlayed_images")
                 
-                for image in overlayed_images:
-                    image_path = os.path.join(latest_folder, image)
-                    self.add_thumbnail(image_path)
-                
-                # Actualizar la barra de progreso
-                self.progress_bar.setValue(len(overlayed_images))
-                
-                # Actualizar el label con la información de la carpeta procesada
-                self.folder_info_label.setText(
-                    f"Carpeta: {folder_name}\n"
-                    f"Total imágenes: {total_images}\n"
-                    f"Procesadas anteriormente: {len(overlayed_images)} (en {overlayed_folders[0]})"
-                )
-            
-            self.btn_process.setEnabled(total_images > 0)
-            if total_images == 0:
-                self.folder_info_label.setText(f"Carpeta: {folder_name}\nNo hay imágenes para procesar")
+                # Check if the overlayed_images subfolder exists
+                if os.path.isdir(overlay_images_path):
+                    # Load existing processed images (JPGs)
+                    processed_jpgs = [f for f in os.listdir(overlay_images_path) if f.lower().endswith(".jpg")]
+                    
+                    num_processed = len(processed_jpgs)
+                    if num_processed > 0:
+                        for image_name in processed_jpgs:
+                            image_path = os.path.join(overlay_images_path, image_name)
+                            self.add_thumbnail(image_path)
+                        
+                        # Update progress bar based on loaded processed images relative to originals
+                        # If #processed >= #originals, assume all are done
+                        progress_value = min(num_processed, total_original_images)
+                        self.progress_bar.setValue(progress_value)
+                        
+                        # Update the info label
+                        self.folder_info_label.setText(
+                            f"Carpeta: {folder_name}\n"
+                            f"Total imágenes originales: {total_original_images}\n"
+                            f"Se cargaron {num_processed} resultados previos de: {most_recent_folder_name}"
+                        )
+                    else:
+                        self.folder_info_label.setText(
+                             f"Carpeta: {folder_name}\n"
+                             f"Total imágenes originales: {total_original_images}\n"
+                             f"Carpeta procesada encontrada ({most_recent_folder_name}), pero sin imágenes JPG."
+                         )
+                else:
+                    self.folder_info_label.setText(
+                         f"Carpeta: {folder_name}\n"
+                         f"Total imágenes originales: {total_original_images}\n"
+                         f"Carpeta procesada encontrada ({most_recent_folder_name}), pero falta subcarpeta 'overlayed_images'."
+                     )
+
+            # Enable process button only if there are original images to process
+            self.btn_process.setEnabled(total_original_images > 0)
+            if total_original_images == 0 and not processed_folders:
+                self.folder_info_label.setText(f"Carpeta: {folder_name}\nNo hay imágenes originales (.tiff/.tif) para procesar.")
     
     def process_images(self):
         if hasattr(self, 'thread') and isinstance(self.thread, ImageProcessorThread) and self.thread.isRunning():
