@@ -282,7 +282,7 @@ class ImageProcessorThread(QThread):
         # Cargar y procesar imagen
         img = Image.open(image_path).convert("RGB")
         predictions = self.predictor.predict(img)
-        
+
         # Guardar imagen con overlay en formato JPG
         overlayed_img = overlay_predictions(predictions, img)
         # Cambiar extensión a .jpg
@@ -290,25 +290,28 @@ class ImageProcessorThread(QThread):
         overlay_path = os.path.join(main_folder, "overlayed_images", overlay_filename_jpg)
         # Guardar con formato JPEG
         overlayed_img.save(overlay_path, format='JPEG', quality=90) # Calidad 90 (ajustable)
+
+        # solo si hay predicciones, creamos la máscara y el resto de cosas
+        if predictions:
         
-        # Crear y guardar máscara básica
-        mask_img, mask_path = self.create_basic_mask(img, predictions, main_folder, base_name, ".jpg") # Pasar extensión .jpg
-        
-        # Procesar máscara para análisis
-        clean_mask = self.process_mask(mask_img, main_folder, base_name, ".jpg") # Pasar extensión .jpg
-        
-        # Analizar objetos en la máscara
-        object_data, feret_diameters, circle_diameters, circularity_values = self.analyze_objects(
-            clean_mask, micrometers_per_pixel, detailed_csv_path, filename)
-        
-        # Escribir resumen en CSV
-        self.write_summary_csv(
-            summary_csv_path, filename, object_data, feret_diameters, circle_diameters, circularity_values)
-        
-        # Crear visualización con datos
-        self.create_visualization(
-            clean_mask.shape, object_data, micrometers_per_pixel, 
-            main_folder, base_name, ".jpg") # Pasar extensión .jpg
+            # Crear y guardar máscara básica
+            mask_img, mask_path = self.create_basic_mask(img, predictions, main_folder, base_name, ".jpg") # Pasar extensión .jpg
+            
+            # Procesar máscara para análisis
+            clean_mask = self.process_mask(mask_img, main_folder, base_name, ".jpg") # Pasar extensión .jpg
+            
+            # Analizar objetos en la máscara
+            object_data, feret_diameters, circle_diameters, circularity_values = self.analyze_objects(
+                clean_mask, micrometers_per_pixel, detailed_csv_path, filename)
+            
+            # Escribir resumen en CSV
+            self.write_summary_csv(
+                summary_csv_path, filename, object_data, feret_diameters, circle_diameters, circularity_values)
+            
+            # Crear visualización con datos
+            self.create_visualization(
+                clean_mask.shape, object_data, micrometers_per_pixel, 
+                main_folder, base_name, ".jpg") # Pasar extensión .jpg
         
         # Actualizar progreso (usar ruta original o la nueva jpg para thumbnail?)
         # Usemos la JPG para el progreso, ya que es la que se guarda
@@ -338,11 +341,7 @@ class ImageProcessorThread(QThread):
                         elif "<OME" in desc and "PhysicalSizeX" in desc:
                             match = re.search(r'PhysicalSizeX="([\d.]+)"', desc)
                             if match:
-                                physical_size_x = float(match.group(1))
-                                size_match = re.search(r'SizeX="(\d+)"', desc)
-                                if size_match:
-                                    size_x = float(size_match.group(1))
-                                    micrometers_per_pixel = physical_size_x / size_x
+                                micrometers_per_pixel = float(match.group(1))
                     
                     # Buscar en tags estándar
                     if micrometers_per_pixel == 1.0 and 'XResolution' in tif.pages[0].tags:
@@ -488,7 +487,7 @@ class ImageProcessorThread(QThread):
         # Convertir a formato OpenCV (x, y, radius)
         return [(x, y, r) for y, x, r in circles]
     
-    def analyze_objects(self, watershed_mask, micrometers_per_pixel, detailed_csv_path, filename):
+    def analyze_objects(self, mask, micrometers_per_pixel, detailed_csv_path, filename):
         """Analiza los objetos en la máscara y calcula sus propiedades."""
         import cv2
         import numpy as np
@@ -496,7 +495,7 @@ class ImageProcessorThread(QThread):
         from skimage.measure import regionprops
         
         # Obtener etiquetas finales
-        final_num_labels, final_labels = cv2.connectedComponents(watershed_mask)
+        final_num_labels, final_labels = cv2.connectedComponents(mask)
         
         # Listas para almacenar mediciones
         feret_diameters = []
