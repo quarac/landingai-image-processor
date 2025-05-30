@@ -1,0 +1,42 @@
+Bibliografía
+1. Zhong W, Chia W. Neurogenesis and asymmetric cell division. Curr Opin
+Neurobiol. 2008 Feb;18(1):4-11. doi: 10.1016/j.conb.2008.05.002.
+2. Belenguer G, Domingo-Muelas A, Ferron SR, Morante-Redolat JM,
+Farinas I. Isolation, culture and analysis of adult subependymal neural
+stem cells. Differentiation. 2016;91(4-5):28-41.
+doi:10.1016/j.diff.2016.01.005.
+3. Bizy A, Ferron SR. Isolation, long-term expansion, and differentiation of
+murine neural stem cells. Methods Mol Biol. 2015;1212:103-12.
+doi:10.1007/7651_2014_91.
+4. Rio-Alvarez A, Marcos PG, González PP, Serrano-Pertierra E, Novelli A,
+Fernández-Sánchez MT, González VM. Evaluating deep learning
+techniques for optimal neurons counting and characterization in complex
+neuronal cultures. Med Biol Eng Comput. 2025 Feb;63(2):545-560. doi:
+10.1007/s11517-024-03202-z.
+5. Yakovlev EV, Simkin IV, Shirokova AA, Kolotieva NA, Novikova SV,
+Nasyrov AD, Denisenko IR, Gursky KD, Shishkov IN, Narzaeva DE,
+Salmina AB, Yurchenko SO, Kryuchkov NP. Machine learning approach
+for recognition and morphological analysis of isolated astrocytes in phase
+contrast microscopy. Sci Rep. 2024 Apr 29;14(1):9846. doi:
+10.1038/s41598-024-59773-2.
+6. Suleymanova I, Balassa T, Tripathi S, Molnar C, Saarma M, Sidorova Y,
+Horvath P. A deep convolutional neural network approach for astrocyte
+detection. Sci Rep. 2018 Aug 27;8(1):12878. doi: 10.1038/s41598-018-
+31284-x.
+7. Kibe K. Deep Learning for Image Segmentation with TensorFlow [Internet].
+Analytics Vidhya; 2023 [consultado el 19 de abril de 2025]. Disponible en:
+https://www.analyticsvidhya.com/blog/2023/04/deep-learning-for-image-
+segmentation-with-tensorflow/
+8. Saurabh. Semantic Segmentation: Introduction to the Deep Learning
+Technique Behind Google Pixel’s Camera! [Internet]. Analytics Vidhya;
+2023 [consultado el 19 de abril de 2025]. Disponible en:
+https://www.analyticsvidhya.com/blog/2019/02/tutorial-semantic-
+segmentation-google-deeplab/
+9. Larsen R, Villadsen TL, Mathiesen JK, Jensen KMØ, Boejesen ED. NP-
+SAM: Implementing the Segment Anything Model for Easy Nanoparticle
+Segmentation in Electron Microscopy Images. ChemRxiv. 2023;
+doi:10.26434/chemrxiv-2023-k73qz-v2
+10. Bankhead P. Analyzing fluorescence microscopy images with ImageJ
+[Internet]. Queen’s University Belfast; 2014 [consultado el 19 de abril de
+2025]. Disponible en: https://petebankhead.gitbooks.io/imagej-
+intro/content/
